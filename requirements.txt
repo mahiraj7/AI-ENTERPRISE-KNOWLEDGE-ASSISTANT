@@ -8,3 +8,4 @@ sentence-transformers
 rank-bm25
 chromadb
 langchain-ollama
+langchain-groq
