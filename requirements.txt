@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+streamlit
+pydantic
+pypdf
+langchain-text-splitters
+sentence-transformers
+rank-bm25
+chromadb
+langchain-ollama
