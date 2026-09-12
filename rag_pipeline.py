@@ -2,6 +2,7 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 from rank_bm25 import BM25Okapi
 from langchain_ollama import ChatOllama
 import chromadb
+import os
 
 
 # ============================================================
@@ -13,9 +14,14 @@ COLLECTION_NAME = "microsoft_annual_report"
 
 THRESHOLD = -5
 
+# LLM provider:
+# "ollama" = local Mac development
+# "groq"   = cloud / Render deployment
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
+
 
 # ============================================================
-# LOAD MODELS
+# LOAD EMBEDDING MODEL
 # ============================================================
 
 print("Loading embedding model...")
@@ -24,24 +30,71 @@ embedding_model = SentenceTransformer(
     "all-MiniLM-L6-v2"
 )
 
+print("Embedding model loaded.")
+
+
+# ============================================================
+# LOAD RERANKER
+# ============================================================
+
 print("Loading reranker...")
 
 reranker = CrossEncoder(
     "cross-encoder/ms-marco-MiniLM-L-6-v2"
 )
 
-print("Connecting to Qwen...")
+print("Reranker loaded.")
 
-llm = ChatOllama(
-    model="qwen2.5:7b",
-    temperature=0,
-    base_url="http://host.docker.internal:11434"
-)
+
+# ============================================================
+# LOAD LLM
+# ============================================================
+
+if LLM_PROVIDER == "groq":
+
+    print("Connecting to Groq...")
+
+    from langchain_groq import ChatGroq
+
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+    if not GROQ_API_KEY:
+        raise ValueError(
+            "GROQ_API_KEY environment variable is not set."
+        )
+
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        temperature=0,
+        api_key=GROQ_API_KEY
+    )
+
+    print("Groq connected.")
+
+
+else:
+
+    print("Connecting to local Ollama...")
+
+    OLLAMA_BASE_URL = os.getenv(
+        "OLLAMA_BASE_URL",
+        "http://host.docker.internal:11434"
+    )
+
+    llm = ChatOllama(
+        model="qwen2.5:7b",
+        temperature=0,
+        base_url=OLLAMA_BASE_URL
+    )
+
+    print("Ollama connected.")
 
 
 # ============================================================
 # CONNECT TO CHROMADB
 # ============================================================
+
+print("Connecting to ChromaDB...")
 
 client = chromadb.PersistentClient(
     path=CHROMA_PATH
@@ -50,6 +103,8 @@ client = chromadb.PersistentClient(
 collection = client.get_collection(
     name=COLLECTION_NAME
 )
+
+print("ChromaDB connected.")
 
 
 # ============================================================
@@ -70,12 +125,18 @@ print("Loaded chunks:", len(chunks))
 # CREATE BM25 INDEX
 # ============================================================
 
+print("Creating BM25 index...")
+
 tokenized_chunks = [
     chunk.lower().split()
     for chunk in chunks
 ]
 
-bm25 = BM25Okapi(tokenized_chunks)
+bm25 = BM25Okapi(
+    tokenized_chunks
+)
+
+print("BM25 index created.")
 
 
 # ============================================================
@@ -85,7 +146,20 @@ bm25 = BM25Okapi(tokenized_chunks)
 def answer_question(query: str):
 
     # --------------------------------------------------------
-    # 1. CREATE QUERY EMBEDDING
+    # VALIDATE QUERY
+    # --------------------------------------------------------
+
+    query = query.strip()
+
+    if not query:
+        return {
+            "answer": "Please enter a question.",
+            "sources": []
+        }
+
+
+    # --------------------------------------------------------
+    # 1. QUERY EMBEDDING
     # --------------------------------------------------------
 
     query_embedding = embedding_model.encode(
@@ -198,6 +272,21 @@ def answer_question(query: str):
 
 
     # --------------------------------------------------------
+    # SAFETY CHECK
+    # --------------------------------------------------------
+
+    if not reranked:
+
+        return {
+            "answer": (
+                "I don't have enough information "
+                "in the provided documents."
+            ),
+            "sources": []
+        }
+
+
+    # --------------------------------------------------------
     # 6. RELEVANCE THRESHOLD
     # --------------------------------------------------------
 
@@ -205,7 +294,10 @@ def answer_question(query: str):
         reranked[0][1]
     )
 
-    print("\nBest reranker score:", best_score)
+    print(
+        "\nBest reranker score:",
+        best_score
+    )
 
 
     if best_score < THRESHOLD:
@@ -268,6 +360,7 @@ If the answer is not present in the context, say:
 "I don't have enough information in the provided documents."
 
 Do not make up facts.
+Do not use outside knowledge.
 
 Context:
 {context}
@@ -283,9 +376,28 @@ Answer:
     # 10. GENERATE ANSWER
     # --------------------------------------------------------
 
-    response = llm.invoke(
-        prompt
-    )
+    try:
+
+        response = llm.invoke(
+            prompt
+        )
+
+        answer = response.content
+
+    except Exception as e:
+
+        print(
+            "LLM error:",
+            str(e)
+        )
+
+        return {
+            "answer": (
+                "Unable to generate an answer "
+                "because the language model is currently unavailable."
+            ),
+            "sources": []
+        }
 
 
     # --------------------------------------------------------
@@ -317,6 +429,6 @@ Answer:
     # --------------------------------------------------------
 
     return {
-        "answer": response.content,
+        "answer": answer,
         "sources": unique_sources
     }
